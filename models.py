@@ -143,7 +143,7 @@ class TextEncoder(nn.Module):
       kernel_size,
       p_dropout):
     super().__init__()
-    self.n_vocab = n_vocab
+    self.n_vocab = n_vocab  # 用不同数据训练，对应的vocab不一样
     self.out_channels = out_channels
     self.hidden_channels = hidden_channels
     self.filter_channels = filter_channels
