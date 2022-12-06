@@ -152,7 +152,7 @@ class TextEncoder(nn.Module):
     self.kernel_size = kernel_size
     self.p_dropout = p_dropout
 
-    self.emb = nn.Embedding(n_vocab, hidden_channels)
+    self.emb = nn.Embedding(n_vocab, hidden_channels)  # 改这个！
     nn.init.normal_(self.emb.weight, 0.0, hidden_channels**-0.5)
 
     self.encoder = attentions.Encoder(
