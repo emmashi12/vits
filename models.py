@@ -13,6 +13,18 @@ from torch.nn import Conv1d, ConvTranspose1d, AvgPool1d, Conv2d
 from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
 from commons import init_weights, get_padding
 
+def upsampling_bert(bert_embedding, text_info):
+  # text_info structure: (('word in phoneme', number of phoneme))  e.g.: ('r ang4', 2)
+  phoneme_num = [x[1] for x in text_info]
+  text_phoneme = [x[0] for x in text_info]
+  total_phoneme = sum(phoneme_num)
+  bert_list = bert_embedding.tolist()
+
+  upsampled = []
+  for i in bert_list:
+    pass
+
+
 
 class StochasticDurationPredictor(nn.Module):
   def __init__(self, in_channels, filter_channels, kernel_size, p_dropout, n_flows=4, gin_channels=0):
@@ -54,42 +66,49 @@ class StochasticDurationPredictor(nn.Module):
       g = torch.detach(g)
       x = x + self.cond(g)
     x = self.convs(x, x_mask)
-    x = self.proj(x) * x_mask
+    x = self.proj(x) * x_mask  # x为文本
 
-    if not reverse:
+    if not reverse:  # 训练阶段
       flows = self.flows
       assert w is not None
 
       logdet_tot_q = 0 
-      h_w = self.post_pre(w)
+      h_w = self.post_pre(w) 
       h_w = self.post_convs(h_w, x_mask)
-      h_w = self.post_proj(h_w) * x_mask
+      h_w = self.post_proj(h_w) * x_mask  # h_w为时长
+
       e_q = torch.randn(w.size(0), 2, w.size(2)).to(device=x.device, dtype=x.dtype) * x_mask
       z_q = e_q
       for flow in self.post_flows:
         z_q, logdet_q = flow(z_q, x_mask, g=(x + h_w))
         logdet_tot_q += logdet_q
       z_u, z1 = torch.split(z_q, [1, 1], 1) 
-      u = torch.sigmoid(z_u) * x_mask
-      z0 = (w - u) * x_mask
+      u = torch.sigmoid(z_u) * x_mask  # 到目前为止，已经得到了u，v(z1)
+      # 后验分布的对数似然logq
       logdet_tot_q += torch.sum((F.logsigmoid(z_u) + F.logsigmoid(-z_u)) * x_mask, [1,2])
       logq = torch.sum(-0.5 * (math.log(2*math.pi) + (e_q**2)) * x_mask, [1,2]) - logdet_tot_q
+      # ================================
 
+      z0 = (w - u) * x_mask
       logdet_tot = 0
       z0, logdet = self.log_flow(z0, x_mask)
       logdet_tot += logdet
       z = torch.cat([z0, z1], 1)
       for flow in flows:
-        z, logdet = flow(z, x_mask, g=x, reverse=reverse)
+        z, logdet = flow(z, x_mask, g=x, reverse=reverse)  # z是高斯分布的噪声
         logdet_tot = logdet_tot + logdet
+
+      # nll: 先验分布的负对数似然
       nll = torch.sum(0.5 * (math.log(2*math.pi) + (z**2)) * x_mask, [1,2]) - logdet_tot
       return nll + logq # [b]
-    else:
+
+    else:  # infer阶段（只走先验分布）
       flows = list(reversed(self.flows))
       flows = flows[:-2] + [flows[-1]] # remove a useless vflow
       z = torch.randn(x.size(0), 2, x.size(2)).to(device=x.device, dtype=x.dtype) * noise_scale
+       # 随机生成一个正态分布噪音eps [batchsize, 2, T_t]
       for flow in flows:
-        z = flow(z, x_mask, g=x, reverse=reverse)
+        z = flow(z, x_mask, g=x, reverse=reverse)  # 逐个经过逆c_flow2得到最终的z
       z0, z1 = torch.split(z, [1, 1], 1)
       logw = z0
       return logw
@@ -176,6 +195,32 @@ class TextEncoder(nn.Module):
     return x, m, logs, x_mask
 
 
+class BertEncoder(nn.Module):
+  def __init__(self, config) -> None:
+     super().__init__()
+
+     import transformers
+
+     device = torch.device(self.config['device'])
+     self.device = device
+
+     # 加载bert模型
+     bert_path = self.config.get('bert_path', None)
+     
+     self.tokenizer = transformers.BertTokenizer.from_pretrained(bert_path)
+     self.bert_model = transformers.BertModel.from_pretrained(bert_path)
+     self.bert_model = self.bert_model.to(device)
+  
+  @torch.no_grad()
+  def bert_embedding(self, texts, text_info):
+    token = self.tokenizer(texts, padding=True, return_tensors='pt')
+    token = {k:token[k].to(self.device) for k in token}
+    emb, _ = self.bert_model(**token)
+
+
+    return emb, token['attention_mask'].unsqueeze(-1)
+
+  
 class ResidualCouplingBlock(nn.Module):
   def __init__(self,
       channels,
@@ -479,7 +524,8 @@ class SynthesizerTrn(nn.Module):
       attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
       attn = monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()
 
-    w = attn.sum(2)
+    # shape of attn: [b, 1, T_s, T_t] t is text, s is spectrogram
+    w = attn.sum(2)  # [b, 1, T_t]  把spectrogram维度加起来，得到每个text对应spectrogram的个数
     if self.use_sdp:
       l_length = self.dp(x, x_mask, w, g=g)
       l_length = l_length / torch.sum(x_mask)
