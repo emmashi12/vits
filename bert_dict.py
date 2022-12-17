@@ -1,3 +1,5 @@
+import re
+
 text = '四川省#2成都市#3东升航#1都大楼#4'
 norm_text = text.replace('#1', '').replace('#2', '').replace('#3', '').replace('#4', '')
 dict = ['东升航都', '解甲园', '四川省', '成都市', '广东省', '深圳市']
